@@ -129,13 +129,26 @@ MODELS = {
     #       - Binarization is applied within SCT code
     "model_seg_sc_contrast_agnostic_nnunet": {
         "url": [
-            "https://github.com/sct-pipeline/contrast-agnostic-softseg-spinalcord/releases/download/v3.0/model_contrast_agnostic_20250123.zip"
+            "https://github.com/quentinRevillon/contrast-agnostic-softseg-spinalcord/releases/download/v4.1/model_contrast_agnostic_20260602.zip"
         ],
         "description": "Spinal cord segmentation agnostic to MRI contrasts",
         "contrasts": ["any"],
         "framework": "nnunetv2",
         "thr": None,  # We're now using an nnUNet model, which does not need a threshold
+        # v4: trained on sc-crop cropped volumes → detect+crop before inference, uncrop after (see inference.py).
+        "crop": True,
         "default": True,
+    },
+    # Previous (v3) model kept as backup; own folder (distinct name) so both coexist. No `crop` → full-volume, as before.
+    "model_seg_sc_contrast_agnostic_nnunet_v3": {
+        "url": [
+            "https://github.com/sct-pipeline/contrast-agnostic-softseg-spinalcord/releases/download/v3.0/model_contrast_agnostic_20250123.zip"
+        ],
+        "description": "Spinal cord segmentation agnostic to MRI contrasts (previous v3 model)",
+        "contrasts": ["any"],
+        "framework": "nnunetv2",
+        "thr": None,
+        "default": False,
     },
     "model_seg_sci_multiclass_sc_lesion_nnunet": {
         "url": [
@@ -393,7 +406,10 @@ TASKS = {
                              'SCI (Acute, Intermediate and Chronic; Pre/Post-operative) patients. Segmentations have been '
                              'tested with the following contrasts: '
                              '[T1w, T2w, T2star, MTon_MTS, GRE_T1w, DWI, mp2rage_UNIT1, PSIR, STIR, EPI], but '
-                             'other contrasts that are close visual matches may also work well with this model.',
+                             'other contrasts that are close visual matches may also work well with this model. '
+                             'The spinal cord is first automatically detected and the image is cropped around it '
+                             '(via sc-crop) before segmentation, then the prediction is restored to the full image '
+                             'space; this is handled internally and requires no extra input.',
          'url': 'https://github.com/sct-pipeline/contrast-agnostic-softseg-spinalcord/',
          'models': ['model_seg_sc_contrast_agnostic_nnunet'],
          'citation': textwrap.dedent("""
@@ -409,6 +425,15 @@ TASKS = {
             ```"""),  # noqa E501 (line too long)
          'group': 'spinal_cord',
          'priority': 100  # Force this, and its group, to be displayed first, as it's our main model
+         },
+    'spinalcord_v3':
+        {'description': 'Spinal cord segmentation agnostic to MRI contrasts (previous v3 model, backup)',
+         'long_description': 'Previous version (v3) of the contrast-agnostic model, kept as a backup during the '
+                             'transition to the default `spinalcord` model. Runs on the full volume (no sc-crop). '
+                             'Use `sct_deepseg spinalcord_v3` if the default model gives unexpected results.',
+         'url': 'https://github.com/sct-pipeline/contrast-agnostic-softseg-spinalcord/',
+         'models': ['model_seg_sc_contrast_agnostic_nnunet_v3'],
+         'group': 'spinal_cord',
          },
     'lesion_sci_t2':
         {'description': 'Intramedullary SCI lesion and cord segmentation in T2w MRI',

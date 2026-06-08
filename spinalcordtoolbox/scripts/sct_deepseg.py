@@ -323,6 +323,21 @@ def get_parser(subparser_to_return=None):
                 help="If set, only 1 fold will be used for inference instead of the full 5-fold ensemble. This will speed up inference, but may reduce segmentation quality."
             )
 
+        # Options for models trained on sc-crop cropped volumes (e.g. contrast-agnostic v4)
+        if any(models.MODELS[m].get('crop') for m in task_dict['models']):
+            crop_group = subparser.add_argument_group('\nSPINAL CORD CROPPING (sc-crop)')
+            crop_group.add_argument(
+                "-crop-mask", metavar=Metavar.file,
+                help="Binary box mask defining the crop region (overrides automatic detection). Typically the "
+                     "`*_cropbox.nii.gz` saved by a previous run, optionally edited in FSLeyes. The crop uses the "
+                     "bounding box of its non-zero voxels.")
+            for face, full in [("sup", "superior"), ("inf", "inferior"), ("left", "left"),
+                               ("right", "right"), ("ant", "anterior"), ("post", "posterior")]:
+                crop_group.add_argument(
+                    f"-crop-pad-{face}", type=float, metavar="MM", default=None,
+                    help=f"Override the {full} padding (mm) of the auto-detected crop box. Enlarge it on the {full} "
+                         f"face if the cord was truncated by the crop.")
+
         # Add input cropping note specific to the `lesion_ms_mp2rage` task
         if task_name == 'lesion_ms_mp2rage':
             task_args['-i'].help += dedent(f"""
@@ -485,12 +500,25 @@ def main(argv: Sequence[str]):
             # The MS lesion model is multifold, which requires turning on the "ensemble averaging" behavior
             if arguments.task == 'lesion_ms':
                 extra_inference_kwargs['ensemble'] = True
+            # Models trained on sc-crop cropped volumes (e.g. contrast-agnostic v4) need the spinal cord to be
+            # detected and the image cropped around it before inference, then the prediction restored afterwards.
+            if models.MODELS[name_model].get('crop'):
+                extra_inference_kwargs['crop'] = True
+                extra_inference_kwargs['crop_mask'] = arguments.crop_mask
+                extra_inference_kwargs['crop_pad'] = {
+                    'pad_superior': arguments.crop_pad_sup, 'pad_inferior': arguments.crop_pad_inf,
+                    'pad_left': arguments.crop_pad_left, 'pad_right': arguments.crop_pad_right,
+                    'pad_anterior': arguments.crop_pad_ant, 'pad_posterior': arguments.crop_pad_post,
+                }
+                # Original input/output names, used to save the box mask and to print the fix command on truncation.
+                extra_inference_kwargs['orig_fname'] = arguments.i[0]
+                extra_inference_kwargs['out_fname'] = arguments.o if getattr(arguments, 'o', None) else None
             # Run inference
             im_lst, target_lst = inference.segment_non_ivadomed(
                 path_model, model_type, input_filenames, thr,
                 # NOTE: contrast-agnostic nnunet model sometimes predicts pixels outside the cord, we want to
                 # set keep_largest object as the default behaviour when using this model
-                keep_largest=1 if arguments.task == 'spinalcord' else arguments.keep_largest,
+                keep_largest=1 if arguments.task in ('spinalcord', 'spinalcord_v3') else arguments.keep_largest,
                 fill_holes_in_pred=arguments.fill_holes,
                 remove_small=arguments.remove_small,
                 use_gpu=use_gpu, remove_temp_files=arguments.r,
