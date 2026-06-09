@@ -8,11 +8,54 @@
 import sys
 from typing import Sequence
 import textwrap
+import numpy as np
 
-from spinalcordtoolbox.cropping import ImageCropper
+from spinalcordtoolbox.cropping import ImageCropper, BoundingBox
 from spinalcordtoolbox.image import Image, add_suffix
 from spinalcordtoolbox.utils.shell import SCTArgumentParser, Metavar, display_viewer_syntax, list_type
 from spinalcordtoolbox.utils.sys import init_sct, set_loglevel
+
+
+def _main_spinalcord(argv):
+    parser = SCTArgumentParser(
+        description="Crop image around the spinal cord using automatic SC detection (sc-crop).")
+    parser.mandatory_arggroup.add_argument(
+        '-i', metavar=Metavar.file, help="Input image. Example: `t2.nii.gz`")
+    parser.optional_arggroup.add_argument(
+        '-o', metavar=Metavar.str,
+        help="Output cropped image. Default: input with '_crop' suffix.")
+    for face, full in [("sup", "superior"), ("inf", "inferior"), ("left", "left"),
+                       ("right", "right"), ("ant", "anterior"), ("post", "posterior")]:
+        parser.optional_arggroup.add_argument(
+            f"-crop-pad-{face}", type=float, metavar="MM", default=None,
+            help=f"Override the {full} padding (mm) of the auto-detected crop box.")
+    parser.add_common_args()
+    arguments = parser.parse_args(argv)
+    set_loglevel(verbose=arguments.v, caller_module_name=__name__)
+
+    import sc_crop
+    import nibabel as nib
+    img_nii = nib.load(arguments.i)
+    faces = [('superior', 'sup'), ('inferior', 'inf'), ('left', 'left'),
+             ('right', 'right'), ('anterior', 'ant'), ('posterior', 'post')]
+    crop_pad = {f'pad_{full}': getattr(arguments, f'crop_pad_{cli}')
+                for full, cli in faces if getattr(arguments, f'crop_pad_{cli}') is not None}
+    bbox = sc_crop.detect(img_nii, **crop_pad)
+
+    fname_out = arguments.o or add_suffix(arguments.i, '_crop')
+    fname_cropbox = add_suffix(arguments.i, '_cropbox')
+    data = np.zeros(img_nii.shape[:3], dtype=np.uint8)
+    data[bbox['xmin']:bbox['xmax']+1, bbox['ymin']:bbox['ymax']+1, bbox['zmin']:bbox['zmax']+1] = 1
+    nib.save(nib.Nifti1Image(data, img_nii.affine, img_nii.header), fname_cropbox)
+
+    cropper = ImageCropper(Image(arguments.i))
+    cropper.bbox = BoundingBox(bbox['xmin'], bbox['xmax'], bbox['ymin'],
+                               bbox['ymax'], bbox['zmin'], bbox['zmax'])
+    cropper.crop().save(fname_out)
+
+    display_viewer_syntax([arguments.i, fname_out, fname_cropbox],
+                          im_types=['anat', 'anat', 'cropbox'], opacities=['', '', ''],
+                          verbose=arguments.v)
 
 
 def get_parser():
@@ -146,11 +189,9 @@ def get_parser():
 
 
 def main(argv: Sequence[str]):
-    """
-    Main function
-    :param argv:
-    :return:
-    """
+    if argv and argv[0] == 'spinalcord':
+        return _main_spinalcord(argv[1:])
+
     parser = get_parser()
     arguments = parser.parse_args(argv)
     verbose = arguments.v
