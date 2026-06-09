@@ -253,8 +253,12 @@ def average_nnunet_predictions(pred, probabilities=False):
 # Map an image axis direction letter (orientation code) to the sc-crop padding face it corresponds to.
 _DIR2PAD = {'S': 'superior', 'I': 'inferior', 'L': 'left', 'R': 'right', 'A': 'anterior', 'P': 'posterior'}
 _DIR2CLI = {'S': 'sup', 'I': 'inf', 'L': 'left', 'R': 'right', 'A': 'ant', 'P': 'post'}
+_DIR2PADKEY = {'S': 'pad_superior', 'I': 'pad_inferior', 'L': 'pad_left',
+               'R': 'pad_right', 'A': 'pad_anterior', 'P': 'pad_posterior'}
 _OPP = {'R': 'L', 'L': 'R', 'A': 'P', 'P': 'A', 'S': 'I', 'I': 'S'}
-_SUGGEST_MM = {'S': 80, 'I': 150, 'L': 30, 'R': 30, 'A': 30, 'P': 40}  # default padding to suggest per face
+# Anatomically motivated defaults (mm): the cord extends more inferiorly than superiorly, and is closer
+# to the posterior wall than the anterior. Used as first-attempt suggestion; subsequent runs double the value.
+_SUGGEST_MM = {'S': 80, 'I': 150, 'L': 30, 'R': 30, 'A': 30, 'P': 40}
 
 
 def _bbox_from_mask(mask_nii, ref_nii):
@@ -284,12 +288,15 @@ def _save_box_mask(bbox, ref_nii, out_path):
     logger.info(f"Crop box mask saved to: {out_path}")
 
 
-def _warn_if_cord_truncated(seg_data, bbox, orientation, in_fname, out_fname):
+def _warn_if_cord_truncated(seg_data, bbox, orientation, in_fname, out_fname, crop_pad=None):
     """Red warning + green fix command if the cord reaches a crop face that is interior to the image.
 
     A cord voxel on an interior crop face means the cord very likely continues beyond the box, i.e. it was
     truncated by the crop. Detectable from the prediction alone (no ground truth needed). The fix targets the
     offending face only, via per-face padding (`-crop-pad-*`), which regenerates the box asymmetrically.
+
+    The suggested padding doubles on each re-run: if the user already passed an explicit `-crop-pad-*` value
+    for a still-truncated face, the suggestion is 2× that value; otherwise the anatomical default is used.
     """
     shape = seg_data.shape
     faces = []  # anatomical direction letters the cord extends towards
@@ -308,7 +315,12 @@ def _warn_if_cord_truncated(seg_data, bbox, orientation, in_fname, out_fname):
     if not faces:
         return
     names = ", ".join(_DIR2PAD[d] for d in faces)
-    pad_opts = " ".join(f"-crop-pad-{_DIR2CLI[d]} {_SUGGEST_MM[d]}" for d in faces)
+    pad_opts_parts = []
+    for d in faces:
+        current = (crop_pad or {}).get(_DIR2PADKEY[d])
+        suggested = current * 2 if current is not None else _SUGGEST_MM[d]
+        pad_opts_parts.append(f"-crop-pad-{_DIR2CLI[d]} {suggested}")
+    pad_opts = " ".join(pad_opts_parts)
     cmd = (f"sct_deepseg spinalcord -i {in_fname}"
            + (f" -o {out_fname}" if out_fname else "") + f" {pad_opts}")
     logger.warning(stylize(
@@ -351,14 +363,18 @@ def segment_nnunet(path_img, tmpdir, predictor, device: torch.device, ensemble=F
             bbox = _bbox_from_mask(nib.load(crop_mask), img_nii)
         else:
             # Auto-detect, with optional per-face padding override (-crop-pad-*).
-            bbox = sc_crop.detect(img_nii, **(crop_pad or {}))
-        assert (bbox["xmax"] >= bbox["xmin"] and bbox["ymax"] >= bbox["ymin"]
-                and bbox["zmax"] >= bbox["zmin"]), "sc-crop: empty/invalid bounding box (detection failed)."
+            # Filter out None values: unspecified faces keep sc-crop's own defaults.
+            bbox = sc_crop.detect(img_nii, **{k: v for k, v in (crop_pad or {}).items() if v is not None})
+        if not (bbox["xmax"] >= bbox["xmin"] and bbox["ymax"] >= bbox["ymin"]
+                and bbox["zmax"] >= bbox["zmin"]):
+            raise ValueError("sc-crop: empty/invalid bounding box (detection failed).")
         # Save the box actually used as a filled mask in the input grid (FSLeyes overlay / QC / manual editing).
         _save_box_mask(bbox, img_nii, _cropbox_path(out_fname, orig_fname or path_img))
         nib.save(sc_crop.crop(img_nii, bbox), path_img_tmp)
 
-    # Get the original orientation of the image, for example LPI
+    # Get the original orientation of the image, for example LPI.
+    # NB: when crop=True, path_img_tmp now holds the cropped image — but cropping preserves orientation,
+    # so orig_orientation is identical to what the full image would give.
     orig_orientation = get_orientation(Image(path_img_tmp))
 
     # Get the orientation used by the model
@@ -431,7 +447,8 @@ def segment_nnunet(path_img, tmpdir, predictor, device: torch.device, ensemble=F
         seg_full.update_header()
         img_out = Image(np.asanyarray(seg_full.dataobj), hdr=seg_full.header)
         # Warn if the cord reaches a crop face that is not the image edge → likely truncated by the box.
-        _warn_if_cord_truncated(img_out.data, bbox, orig_orientation, orig_fname or path_img, out_fname)
+        # Pass crop_pad so the suggestion can double the current value on repeated truncation.
+        _warn_if_cord_truncated(img_out.data, bbox, orig_orientation, orig_fname or path_img, out_fname, crop_pad)
 
     labels = {k: v for k, v in predictor.dataset_json['labels'].items() if k != 'background'}
     # for the canal model, keep only the largest object
