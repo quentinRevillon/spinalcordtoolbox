@@ -8,7 +8,6 @@
 import sys
 from typing import Sequence
 import textwrap
-import numpy as np
 
 from spinalcordtoolbox.cropping import ImageCropper, BoundingBox
 from spinalcordtoolbox.image import Image, add_suffix
@@ -44,9 +43,7 @@ def _main_spinalcord(argv):
 
     fname_out = arguments.o or add_suffix(arguments.i, '_crop')
     fname_cropbox = add_suffix(arguments.i, '_cropbox')
-    data = np.zeros(img_nii.shape[:3], dtype=np.uint8)
-    data[bbox['xmin']:bbox['xmax']+1, bbox['ymin']:bbox['ymax']+1, bbox['zmin']:bbox['zmax']+1] = 1
-    nib.save(nib.Nifti1Image(data, img_nii.affine, img_nii.header), fname_cropbox)
+    sc_crop.save_bbox_nifti(bbox, img_nii, fname_cropbox)
 
     cropper = ImageCropper(Image(arguments.i))
     cropper.bbox = BoundingBox(bbox['xmin'], bbox['xmax'], bbox['ymin'],
