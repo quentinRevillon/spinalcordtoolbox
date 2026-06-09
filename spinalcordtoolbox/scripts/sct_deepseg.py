@@ -21,7 +21,7 @@ from textwrap import dedent
 import functools
 
 from spinalcordtoolbox.reports import qc2
-from spinalcordtoolbox.image import splitext, Image, check_image_kind
+from spinalcordtoolbox.image import splitext, Image, check_image_kind, add_suffix
 from spinalcordtoolbox.utils.shell import SCTArgumentParser, Metavar, display_viewer_syntax, ActionCreateFolder
 from spinalcordtoolbox.utils.sys import init_sct, printv, __sct_dir__, set_loglevel, __version__, _git_info
 from spinalcordtoolbox.utils.sys import LazyLoader
@@ -643,6 +643,14 @@ def main(argv: Sequence[str]):
         images.append(output_filename)
         im_types.append(check_image_kind(Image(output_filename)))
         opacities.append('0.7')
+    crop_used = any(models.MODELS[m].get('crop') for m in name_models if m in models.MODELS)
+    if crop_used:
+        _out = getattr(arguments, 'o', None)
+        fname_cropbox = add_suffix(_out if _out else arguments.i[0], "_cropbox")
+        if os.path.isfile(fname_cropbox):
+            images.append(fname_cropbox)
+            im_types.append('cropbox')
+            opacities.append('')
     display_viewer_syntax(images, im_types=im_types, opacities=opacities, verbose=verbose)
 
 
