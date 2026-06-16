@@ -338,6 +338,16 @@ def get_parser(subparser_to_return=None):
                     help=f"Override the {full} padding (mm) of the auto-detected crop box. Enlarge it on the {full} "
                          f"face if the cord was truncated by the crop.")
 
+        # Inference backend for nnUNet models that are converted to ONNX at install time.
+        if any(models.MODELS[m].get('onnx') for m in task_dict['models']):
+            params.add_argument(
+                "-backend",
+                choices=("onnx", "nnunet"),
+                default="onnx",
+                help="Inference backend for the nnUNet model. 'onnx' (default) runs via onnxruntime "
+                     "without PyTorch. 'nnunet' uses the original PyTorch nnUNet predictor (e.g. for "
+                     "validation or debugging).")
+
         # Add input cropping note specific to the `lesion_ms_mp2rage` task
         if task_name == 'lesion_ms_mp2rage':
             task_args['-i'].help += dedent(f"""
@@ -467,6 +477,11 @@ def main(argv: Sequence[str]):
         except ValueError:
             printv(f"Model type could not be determined. Directory '{path_model}' may be missing necessary files."
                    f"Please redownload the model using `sct_deepseg {arguments.task} -install` before continuing.", type="error")
+
+        # Default to the ONNX backend for nnUNet models converted at install time (override with `-backend nnunet`).
+        if (model_type == 'nnunet' and models.MODELS[name_model].get('onnx')
+                and getattr(arguments, 'backend', 'nnunet') == 'onnx'):
+            model_type = 'onnx'
 
         # Control GPU usage based on SCT-specific environment variable
         # NB: We use 'SCT_USE_GPU' as a "hidden option" to turn on GPU inference internally.

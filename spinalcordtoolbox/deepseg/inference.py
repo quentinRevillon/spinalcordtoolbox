@@ -28,6 +28,7 @@ from spinalcordtoolbox.deepseg_.postprocessing import keep_largest_object, fill_
 import spinalcordtoolbox.deepseg.models as ds_models
 import spinalcordtoolbox.deepseg.monai as ds_monai
 import spinalcordtoolbox.deepseg.nnunet as ds_nnunet
+import spinalcordtoolbox.deepseg.onnx_nnunet as ds_onnx
 
 from spinalcordtoolbox.utils.sys import LazyLoader, stylize
 
@@ -121,6 +122,9 @@ def segment_non_ivadomed(path_model, model_type, input_filenames, threshold, kee
     elif model_type == "monai":
         create_net = ds_monai.create_nnunet_from_plans
         inference = segment_monai
+    elif model_type == "onnx":
+        create_net = ds_onnx.create_onnx_session
+        inference = segment_onnx
     else:
         assert model_type == "nnunet"
         create_net = ds_nnunet.create_nnunet_from_plans
@@ -474,6 +478,104 @@ def segment_nnunet(path_img, tmpdir, predictor, device: torch.device, ensemble=F
         fnames_out.append(fname_out)
 
     return fnames_out, targets
+
+
+def segment_onnx(path_img, tmpdir, predictor, device,
+                 crop=False, crop_mask=None, crop_pad=None, orig_fname=None, out_fname=None):
+    """
+    ONNX inference for nnUNet spinal cord models (onnxruntime only, no PyTorch).
+
+    Structurally identical to `segment_nnunet` (sc-crop, reorientation to the model orientation
+    using SCT's own convention, axis transpose, uncrop, output handling). The ONLY difference is
+    the engine: the cropped+reoriented array is fed to `nnunet_onnx.infer_onnx_array` instead of
+    nnUNet's `predict_single_npy_array`. Reorientation is done here (by SCT), NOT inside
+    nnunet_onnx, so the orientation convention matches the PyTorch path exactly (Dice 1.0).
+    Single-class (binary) models only — see https://github.com/quentinRevillon/nnunet-onnx/issues/1.
+    Use `-backend nnunet` otherwise.
+    """
+    from nnunet_onnx import infer_onnx_array
+
+    # Copy the file to the temporary directory
+    path_img_tmp = os.path.join(tmpdir, os.path.basename(path_img))
+    shutil.copyfile(path_img, path_img_tmp)
+    logger.info(f'Copied {path_img} to {path_img_tmp}')
+
+    # `crop` models (e.g. contrast-agnostic v4): detect the SC and crop before inference, keep bbox to uncrop after.
+    # sc-crop is orientation-agnostic, so we crop here (original orientation), before the reorientation below.
+    bbox = None
+    if crop:
+        import sc_crop
+        img_nii = nib.load(path_img_tmp)
+        if crop_mask:
+            # User-supplied box: crop to the bounding box of its non-zero voxels (no detection).
+            mask_nii = nib.load(crop_mask)
+            if mask_nii.shape[:3] != img_nii.shape[:3]:
+                raise ValueError(f"`-crop-mask`: mask shape {mask_nii.shape[:3]} does not match the input "
+                                 f"image {img_nii.shape[:3]}. The mask must be in the same space/grid as the input.")
+            nz = np.nonzero(np.asanyarray(mask_nii.dataobj))
+            if nz[0].size == 0:
+                raise ValueError("`-crop-mask`: the provided mask is empty (no non-zero voxels).")
+            bbox = {"xmin": int(nz[0].min()), "xmax": int(nz[0].max()),
+                    "ymin": int(nz[1].min()), "ymax": int(nz[1].max()),
+                    "zmin": int(nz[2].min()), "zmax": int(nz[2].max()),
+                    "_original_img": img_nii}
+        else:
+            # Auto-detect, with optional per-face padding override (-crop-pad-*); None faces keep sc-crop defaults.
+            bbox = sc_crop.detect(img_nii, **{k: v for k, v in (crop_pad or {}).items() if v is not None})
+        if not (bbox["xmax"] >= bbox["xmin"] and bbox["ymax"] >= bbox["ymin"]
+                and bbox["zmax"] >= bbox["zmin"]):
+            raise ValueError("sc-crop: empty/invalid bounding box (detection failed).")
+        sc_crop.save_bbox_nifti(bbox, img_nii, _cropbox_path(out_fname, orig_fname or path_img))
+        nib.save(sc_crop.crop(img_nii, bbox), path_img_tmp)
+
+    # Reorient to the model orientation using SCT's convention (same as segment_nnunet), so the
+    # array fed to the ONNX engine matches the PyTorch path. nnunet_onnx does NOT reorient.
+    orig_orientation = get_orientation(Image(path_img_tmp))
+    model_orientation = predictor.dataset_json.get('image_orientation', 'LPI')
+    img_in = Image(path_img_tmp)
+    if orig_orientation != model_orientation:
+        logger.info(f'Changing orientation of the input to the model orientation ({model_orientation})...')
+        img_in.change_orientation(model_orientation)
+
+    # Run ONNX inference (engine only). Axes [x,y,z] -> [z,y,x] and spacing reversed to match nnUNet
+    # conventions, exactly as segment_nnunet does for predict_single_npy_array.
+    print('Starting inference...')
+    start = time.time()
+    pred = infer_onnx_array(img_in.data.transpose([2, 1, 0]), tuple(img_in.dim[6:3:-1]), predictor.onnx_path)
+    pred = pred.transpose([2, 1, 0])
+    img_out = img_in.copy()
+    img_out.data = pred
+    end = time.time()
+    print('Inference done.')
+    total_time = end - start
+    print(f'Total inference time: {int(total_time // 60)} minute(s) {int(round(total_time % 60))} seconds')
+
+    # Reorient the prediction back to the original orientation
+    if orig_orientation != model_orientation:
+        img_out.change_orientation(orig_orientation)
+
+    # Restore the cropped prediction to the full image space (uncrop() reuses the original affine/header).
+    if crop:
+        seg_full = sc_crop.uncrop(nib.Nifti1Image(np.asanyarray(img_out.data), img_out.affine), bbox)
+        seg_full.update_header()
+        img_out = Image(np.asanyarray(seg_full.dataobj), hdr=seg_full.header)
+        # Warn if the cord reaches a crop face that is not the image edge → likely truncated by the box.
+        # Pass crop_pad so the suggestion can double the current value on repeated truncation.
+        _warn_if_cord_truncated(img_out, bbox, orig_fname or path_img, out_fname, crop_pad)
+
+    # The ONNX backend currently supports only the binary spinal cord model (single `_seg` output).
+    labels = {k: v for k, v in predictor.dataset_json['labels'].items() if k != 'background'}
+    if sorted(labels.keys()) != ['sc']:
+        raise ValueError(f"The ONNX backend supports only the binary spinal cord model (labels == ['sc']), "
+                         f"got {sorted(labels.keys())}. Use `-backend nnunet` for this model.")
+
+    tmpdir_nnunet = os.path.join(tmpdir, 'nnUNet_prediction')
+    os.mkdir(tmpdir_nnunet)
+    fname_out = add_suffix(os.path.join(tmpdir_nnunet, os.path.basename(add_suffix(path_img_tmp, "_pred"))), "_seg")
+    logger.info(f"Saving results to: {fname_out}")
+    img_out.save(fname_out)
+
+    return [fname_out], ["_seg"]
 
 
 def segment_totalspineseg(path_img, tmpdir, predictor, device, label_vert=False):

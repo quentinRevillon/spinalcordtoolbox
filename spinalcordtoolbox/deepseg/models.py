@@ -137,6 +137,9 @@ MODELS = {
         "thr": None,  # We're now using an nnUNet model, which does not need a threshold
         # v4: trained on sc-crop cropped volumes → detect+crop before inference, uncrop after (see inference.py).
         "crop": True,
+        # Converted to ONNX at install time (see `install_model`) and run via the default `onnx`
+        # inference backend (onnxruntime, no PyTorch). Override at runtime with `-backend nnunet`.
+        "onnx": True,
         "default": True,
     },
     # Previous (v3) model kept as backup; own folder (distinct name) so both coexist. No `crop` → full-volume, as before.
@@ -673,6 +676,39 @@ def folder(name_model):
     return os.path.join(__deepseg_dir__, name_model)
 
 
+def _export_onnx(path_model):
+    """
+    Convert the installed nnUNet checkpoint to a self-contained `model.onnx` (one-time, at install).
+
+    The ONNX file is written next to the checkpoint and used by the default `onnx` inference backend
+    (onnxruntime only, no PyTorch). The conversion itself requires PyTorch + nnunetv2 (already
+    installed by SCT); the exporter is provided by the `nnunet_onnx` package.
+    """
+    trainer_dirs = glob.glob(os.path.join(path_model, "nnUNetTrainer*"))
+    if len(trainer_dirs) != 1:
+        raise FileNotFoundError(f"Expected exactly one 'nnUNetTrainer*' directory in {path_model}, "
+                                f"found {len(trainer_dirs)}.")
+    trainer_dir = trainer_dirs[0]
+    output = os.path.join(trainer_dir, "model.onnx")
+    if os.path.isfile(output):
+        return  # already converted
+    # Single-fold export (fold_0 if present, else the first available fold).
+    fold_dirs = sorted(glob.glob(os.path.join(trainer_dir, "fold_*")))
+    if not fold_dirs:
+        raise FileNotFoundError(f"No 'fold_*' directory found in {trainer_dir}.")
+    fold_dir = next((d for d in fold_dirs if os.path.basename(d) == "fold_0"), fold_dirs[0])
+    # Prefer checkpoint_final.pth, fall back to checkpoint_best.pth (matches the nnunet backend).
+    for ckpt_name in ("checkpoint_final.pth", "checkpoint_best.pth"):
+        checkpoint = os.path.join(fold_dir, ckpt_name)
+        if os.path.isfile(checkpoint):
+            break
+    else:
+        raise FileNotFoundError(f"No 'checkpoint_final.pth' or 'checkpoint_best.pth' in {fold_dir}.")
+    logger.info(f"Converting nnUNet checkpoint to ONNX: {checkpoint} -> {output}")
+    from nnunet_onnx.export import export  # local import: the exporter pulls torch + nnunetv2
+    export(checkpoint_path=checkpoint, output=output)
+
+
 def install_model(name_model, custom_url=None):
     """
     Download and install specified model under SCT installation dir.
@@ -716,6 +752,11 @@ def install_model(name_model, custom_url=None):
                 logger.info(f"\nInstalling '{seed_name}'...")
                 urls_used[seed_name] = download.install_data(model_urls, target_directory, keep=True,
                                                              dirs_to_preserve=dirs_to_preserve)
+    # Convert nnUNet checkpoints to ONNX so the default `onnx` inference backend can use them
+    # (one-time, at install). See `MODELS[...]['onnx']` and `deepseg/onnx_nnunet.py`.
+    if MODELS[name_model].get('onnx'):
+        _export_onnx(folder(name_model))
+
     # Write `source.json` (for model provenance / updating)
     source_dict = {
         'model_name': name_model,
