@@ -58,6 +58,10 @@ onnxruntime>=1.7.0,!=1.16.0,<1.22.0
 # onnx==[1.16.2,1.17.0,1.18.0] all cause errors for Python 3.9 + Windows (https://github.com/onnx/onnx/issues/6267#issuecomment-2877327002)
 # 1.17.0 can partially work as long as SCT doesn't import it, but this is flaky.
 onnx<1.16.2
+# nnunet-onnx: ONNX export + onnxruntime inference for nnUNet models (default `onnx` backend in sct_deepseg).
+# Base install adds no heavy deps (onnxruntime/onnx/nibabel/numpy/scipy/scikit-image are already required);
+# the install-time conversion reuses SCT's existing torch + nnunetv2. TODO: pin to a release tag once cut.
+nnunet-onnx @ git+https://github.com/quentinRevillon/nnunet-onnx.git
 pandas
 portalocker
 psutil
