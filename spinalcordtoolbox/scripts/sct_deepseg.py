@@ -664,7 +664,7 @@ def main(argv: Sequence[str]):
     if os.path.isfile(fname_cropbox):
         images.append(fname_cropbox)
         im_types.append('cropbox')
-        opacities.append('')
+        opacities.append('0.3')
     display_viewer_syntax(images, im_types=im_types, opacities=opacities, verbose=verbose)
 
 
