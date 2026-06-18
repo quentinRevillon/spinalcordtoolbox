@@ -651,18 +651,18 @@ def main(argv: Sequence[str]):
                     fname_qc_seg=fname_qc_seg
                 )
 
-    images = [os.path.abspath(arguments.i[0])]
+    images = [arguments.i[0]]
     im_types = ['anat']
     opacities = ['']
     for output_filename in output_filenames:
-        images.append(os.path.abspath(output_filename))
+        images.append(output_filename)
         im_types.append(check_image_kind(Image(output_filename)))
         opacities.append('0.7')
-    # If a crop box was saved (sc-crop with -fast), add it as a red outline overlay in FSLeyes.
+    # If a crop box was saved (sc-crop with -fast), add it as a yellow outline overlay in FSLeyes.
     _out = getattr(arguments, 'o', None)
     fname_cropbox = add_suffix(_out if _out else arguments.i[0], "_cropbox")
     if os.path.isfile(fname_cropbox):
-        images.append(os.path.abspath(fname_cropbox))
+        images.append(fname_cropbox)
         im_types.append('cropbox')
         opacities.append('')
     display_viewer_syntax(images, im_types=im_types, opacities=opacities, verbose=verbose)
