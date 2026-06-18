@@ -154,7 +154,7 @@ def _construct_fsleyes_syntax(viewer, files, im_types, minmax, opacities):
                 if key in ("seg", "softseg"):
                     key = f"{key}-{next(n)}"
                 if key == 'cropbox':
-                    cmd += ' -ot mask -mc 1 0 0 --outline -w 3'
+                    cmd += ' -ot mask -mc 1 0 0 -o -w 3'
                 else:
                     cmd += ' -cm ' + IMTYPES_COLORMAP[key]['fsleyes']
         if minmax:
