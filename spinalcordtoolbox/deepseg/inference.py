@@ -29,7 +29,7 @@ import spinalcordtoolbox.deepseg.models as ds_models
 import spinalcordtoolbox.deepseg.monai as ds_monai
 import spinalcordtoolbox.deepseg.nnunet as ds_nnunet
 
-from spinalcordtoolbox.utils.sys import LazyLoader
+from spinalcordtoolbox.utils.sys import LazyLoader, stylize
 
 nib = LazyLoader("nib", globals(), "nibabel")
 
@@ -249,10 +249,56 @@ def average_nnunet_predictions(pred, probabilities=False):
     return pred
 
 
-def segment_nnunet(path_img, tmpdir, predictor, device: torch.device, ensemble=False, soft_ms_lesion=False):
+# ── sc-crop helpers ──────────────────────────────────────────────────────────
+# Anatomical padding defaults (mm) used as first suggestion when a cord is truncated.
+# On repeated truncation the suggestion doubles the current value (see _warn_if_cord_truncated).
+_SUGGEST_MM = {
+    'pad_superior': 80, 'pad_inferior': 150,
+    'pad_left': 30, 'pad_right': 30,
+    'pad_anterior': 30, 'pad_posterior': 40,
+}
+_PAD_TO_CLI = {
+    'pad_superior': 'sup', 'pad_inferior': 'inf',
+    'pad_left': 'left', 'pad_right': 'right',
+    'pad_anterior': 'ant', 'pad_posterior': 'post',
+}
+
+
+def _cropbox_path(out_fname, fallback_fname):
+    """Return the path where the crop box mask is saved (next to the output, else next to the input)."""
+    return add_suffix(out_fname if out_fname else fallback_fname, "_cropbox")
+
+
+def _warn_if_cord_truncated(img_out, bbox, in_fname, out_fname, crop_pad=None):
+    """Warn (red) + print fix command (green) if the segmentation reaches a crop face interior to the image."""
+    import sc_crop
+    truncated = sc_crop.check_seg_truncation(
+        nib.Nifti1Image(np.asanyarray(img_out.data), img_out.affine), bbox
+    )
+    if not truncated:
+        return
+    names = ", ".join(f.replace("pad_", "") for f in truncated)
+    pad_parts = []
+    for face in truncated:
+        current = (crop_pad or {}).get(face)
+        suggested = current * 2 if current is not None else _SUGGEST_MM[face]
+        pad_parts.append(f"-crop-pad-{_PAD_TO_CLI[face]} {suggested}")
+    cmd = (f"sct_deepseg spinalcord -i {in_fname}"
+           + (f" -o {out_fname}" if out_fname else "")
+           + f" -fast {' '.join(pad_parts)}")
+    logger.warning(stylize(
+        f"\nWARNING: the segmentation reaches the crop box on face(s): {names}.\n"
+        f"The spinal cord is likely truncated by the crop.", ["Red", "Bold"]))
+    logger.warning(stylize(f"To fix it, enlarge the crop and re-run:\n  {cmd}\n", "Green"))
+
+
+def segment_nnunet(path_img, tmpdir, predictor, device: torch.device, ensemble=False, soft_ms_lesion=False,
+                   crop=False, crop_mask=None, crop_pad=None, orig_fname=None, out_fname=None):
     """
     This script is used to run inference on a single subject using a nnUNetV2 model.
     For soft segmentation of MS lesions, set `soft_ms_lesion=True`. Output segmentation will be thresholded at 1e-3.
+    If `crop=True`, the spinal cord is detected and the image cropped before inference (sc-crop), then the
+    prediction is restored to the full image space.
 
     Author: Jan Valosek, Naga Karthik
     Original script: https://github.com/ivadomed/model_seg_sci/blob/4184bc22ef7317b3de5f85dee28449d6f381c984/packaging/run_inference_single_subject.py
@@ -269,6 +315,31 @@ def segment_nnunet(path_img, tmpdir, predictor, device: torch.device, ensemble=F
     path_img_tmp = os.path.join(tmpdir, os.path.basename(path_img))
     shutil.copyfile(path_img, path_img_tmp)
     logger.info(f'Copied {path_img} to {path_img_tmp}')
+
+    # sc-crop: detect the SC and crop before inference; bbox is used to uncrop after.
+    # Cropping is done here in the original orientation (sc-crop is orientation-agnostic),
+    # before the reorientation step below (which preserves the orientation after cropping).
+    bbox = None
+    if crop:
+        import sc_crop
+        img_nii = nib.load(path_img_tmp)
+        if crop_mask:
+            mask_nii = nib.load(crop_mask)
+            if mask_nii.shape[:3] != img_nii.shape[:3]:
+                raise ValueError(f"`-crop-mask` shape {mask_nii.shape[:3]} does not match input {img_nii.shape[:3]}.")
+            nz = np.nonzero(np.asanyarray(mask_nii.dataobj))
+            if nz[0].size == 0:
+                raise ValueError("`-crop-mask`: the provided mask is empty (no non-zero voxels).")
+            bbox = {"xmin": int(nz[0].min()), "xmax": int(nz[0].max()),
+                    "ymin": int(nz[1].min()), "ymax": int(nz[1].max()),
+                    "zmin": int(nz[2].min()), "zmax": int(nz[2].max()),
+                    "_original_img": img_nii}
+        else:
+            bbox = sc_crop.detect(img_nii, **{k: v for k, v in (crop_pad or {}).items() if v is not None})
+        if not (bbox["xmax"] >= bbox["xmin"] and bbox["ymax"] >= bbox["ymin"] and bbox["zmax"] >= bbox["zmin"]):
+            raise ValueError("sc-crop: empty/invalid bounding box (detection failed).")
+        sc_crop.save_bbox_nifti(bbox, img_nii, _cropbox_path(out_fname, orig_fname or path_img))
+        nib.save(sc_crop.crop(img_nii, bbox), path_img_tmp)
 
     # Get the original orientation of the image, for example LPI
     orig_orientation = get_orientation(Image(path_img_tmp))
@@ -336,6 +407,13 @@ def segment_nnunet(path_img, tmpdir, predictor, device: torch.device, ensemble=F
     if orig_orientation != model_orientation:
         img_out.change_orientation(orig_orientation)
         logger.info(f'Reorientation to original orientation {orig_orientation} done.')
+
+    # sc-crop: restore the prediction to the full image space.
+    if crop:
+        seg_full = sc_crop.uncrop(nib.Nifti1Image(np.asanyarray(img_out.data), img_out.affine), bbox)
+        seg_full.update_header()
+        img_out = Image(np.asanyarray(seg_full.dataobj), hdr=seg_full.header)
+        _warn_if_cord_truncated(img_out, bbox, orig_fname or path_img, out_fname, crop_pad)
 
     labels = {k: v for k, v in predictor.dataset_json['labels'].items() if k != 'background'}
     # for the canal model, keep only the largest object

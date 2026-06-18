@@ -21,7 +21,7 @@ from textwrap import dedent
 import functools
 
 from spinalcordtoolbox.reports import qc2
-from spinalcordtoolbox.image import splitext, Image, check_image_kind
+from spinalcordtoolbox.image import splitext, Image, check_image_kind, add_suffix
 from spinalcordtoolbox.utils.shell import SCTArgumentParser, Metavar, display_viewer_syntax, ActionCreateFolder
 from spinalcordtoolbox.utils.sys import init_sct, printv, __sct_dir__, set_loglevel, __version__, _git_info
 from spinalcordtoolbox.utils.sys import LazyLoader
@@ -323,6 +323,31 @@ def get_parser(subparser_to_return=None):
                 help="If set, only 1 fold will be used for inference instead of the full 5-fold ensemble. This will speed up inference, but may reduce segmentation quality."
             )
 
+        # spinalcord: -fast activates the v4 sc-crop model (faster on large FOV, requires sc-crop package)
+        if task_name == 'spinalcord':
+            params.add_argument(
+                "-fast",
+                action="store_true",
+                help="Use the v4 contrast-agnostic model with automatic spinal cord detection and cropping "
+                     "(sc-crop). Faster on large FOV images. The crop box is saved as `*_cropbox.nii.gz` "
+                     "next to the output for inspection. Use `-crop-pad-*` to enlarge a face if the cord "
+                     "is truncated by the crop.")
+
+        # Cropping controls for tasks whose models include a `crop`-flagged model (e.g. spinalcord v4).
+        if any(models.MODELS[m].get('crop') for m in task_dict['models']):
+            crop_group = subparser.add_argument_group('\nSPINAL CORD CROPPING (sc-crop)')
+            crop_group.add_argument(
+                "-crop-mask", metavar=Metavar.file,
+                help="Binary box mask defining the crop region (overrides automatic detection). Typically the "
+                     "`*_cropbox.nii.gz` saved by a previous run, optionally edited in FSLeyes. The crop uses "
+                     "the bounding box of its non-zero voxels.")
+            for face, full in [("sup", "superior"), ("inf", "inferior"), ("left", "left"),
+                                ("right", "right"), ("ant", "anterior"), ("post", "posterior")]:
+                crop_group.add_argument(
+                    f"-crop-pad-{face}", type=float, metavar="MM", default=None,
+                    help=f"Override the {full} padding (mm) of the auto-detected crop box. Enlarge it on the "
+                         f"{full} face if the cord was truncated by the crop.")
+
         # Add input cropping note specific to the `lesion_ms_mp2rage` task
         if task_name == 'lesion_ms_mp2rage':
             task_args['-i'].help += dedent(f"""
@@ -392,6 +417,10 @@ def main(argv: Sequence[str]):
 
     # Get pipeline model names
     name_models = models.TASKS[arguments.task]['models']
+
+    # spinalcord: -fast switches to the v4 sc-crop model; default stays on v3 (full-volume, as in master).
+    if arguments.task == 'spinalcord' and getattr(arguments, 'fast', False):
+        name_models = ['model_seg_sc_contrast_agnostic_nnunet_v4']
 
     # Check if all input images and contrasts have been specified (only relevant for 'tumor-edema-cavity_t1-t2')
     if arguments.task == 'tumor_edema_cavity_t1_t2':
@@ -485,6 +514,20 @@ def main(argv: Sequence[str]):
             # The MS lesion model is multifold, which requires turning on the "ensemble averaging" behavior
             if arguments.task == 'lesion_ms':
                 extra_inference_kwargs['ensemble'] = True
+            # crop-flagged models (e.g. contrast-agnostic v4 with -fast): detect SC, crop, run inference, uncrop.
+            if models.MODELS[name_model].get('crop'):
+                extra_inference_kwargs['crop'] = True
+                extra_inference_kwargs['crop_mask'] = getattr(arguments, 'crop_mask', None)
+                extra_inference_kwargs['crop_pad'] = {
+                    'pad_superior':  getattr(arguments, 'crop_pad_sup',  None),
+                    'pad_inferior':  getattr(arguments, 'crop_pad_inf',  None),
+                    'pad_left':      getattr(arguments, 'crop_pad_left', None),
+                    'pad_right':     getattr(arguments, 'crop_pad_right', None),
+                    'pad_anterior':  getattr(arguments, 'crop_pad_ant',  None),
+                    'pad_posterior': getattr(arguments, 'crop_pad_post', None),
+                }
+                extra_inference_kwargs['orig_fname'] = arguments.i[0]
+                extra_inference_kwargs['out_fname'] = getattr(arguments, 'o', None)
             # Run inference
             im_lst, target_lst = inference.segment_non_ivadomed(
                 path_model, model_type, input_filenames, thr,
@@ -615,6 +658,13 @@ def main(argv: Sequence[str]):
         images.append(output_filename)
         im_types.append(check_image_kind(Image(output_filename)))
         opacities.append('0.7')
+    # If a crop box was saved (sc-crop with -fast), add it as a red outline overlay in FSLeyes.
+    _out = getattr(arguments, 'o', None)
+    fname_cropbox = add_suffix(_out if _out else arguments.i[0], "_cropbox")
+    if os.path.isfile(fname_cropbox):
+        images.append(fname_cropbox)
+        im_types.append('cropbox')
+        opacities.append('')
     display_viewer_syntax(images, im_types=im_types, opacities=opacities, verbose=verbose)
 
 
