@@ -17,7 +17,7 @@ from enum import Enum
 from functools import cached_property, partial
 
 from .sys import check_exe, printv, ANSIColors16
-from pathlib import Path
+from .fs import relpath_or_abspath
 from .profiling import TimeProfilingAction, MemoryTracingAction
 
 logger = logging.getLogger(__name__)
@@ -85,7 +85,8 @@ def display_viewer_syntax(files, verbose, im_types=[], minmax=[], opacities=[], 
     display_viewer_syntax([file1, file2, file3])
     display_viewer_syntax([file1, file2], im_types=['anat', 'softseg'], minmax=['', '0,1'], opacities=['', '0.7'])
     """
-    files = [str(Path(filepath).resolve()) for filepath in files]
+    # Try to convert the path to one that is relative to the CWD; if not possible, use the abspath instead.
+    files = [str(relpath_or_abspath(filepath, parent_path=os.getcwd())) for filepath in files]
 
     available_viewers = [viewer for viewer in SUPPORTED_VIEWERS if check_exe(viewer)]
 
@@ -145,8 +146,7 @@ def _construct_fsleyes_syntax(viewer, files, im_types, minmax, opacities):
     cmd = viewer
     n = itertools.cycle([1, 2, 3, 4])  # There are 4 colormaps for segs
     for i in range(len(files)):
-        sep = ' \\\n    ' if i > 0 else ' '
-        cmd += sep + files[i]
+        cmd += ' ' + files[i]
         if im_types:
             if im_types[i]:
                 key = im_types[i]
